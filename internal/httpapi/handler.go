@@ -1,0 +1,100 @@
+// Package httpapi exposes the rocket service over HTTP.
+package httpapi
+
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+
+	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/rocket"
+)
+
+type handler struct {
+	svc *rocket.Service
+	log *slog.Logger
+}
+
+// New returns the HTTP handler for the rocket API.
+func New(svc *rocket.Service, log *slog.Logger) http.Handler {
+	h := &handler{svc: svc, log: log}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /messages", h.postMessage)
+	mux.HandleFunc("GET /rockets", h.listRockets)
+	mux.HandleFunc("GET /rockets/{channel}", h.getRocket)
+	return mux
+}
+
+func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
+	var m rocket.Message
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid message: "+err.Error())
+		return
+	}
+	if _, err := h.svc.Ingest(r.Context(), m); err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+	// No body: the rockets test client does not read response bodies, so any
+	// body would stop it from reusing the connection.
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (h *handler) listRockets(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	field, err := rocket.ParseSortField(q.Get("sort"))
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var desc bool
+	switch q.Get("order") {
+	case "", "asc":
+	case "desc":
+		desc = true
+	default:
+		h.writeError(w, http.StatusBadRequest, `order must be "asc" or "desc"`)
+		return
+	}
+
+	states, err := h.svc.List(r.Context(), field, desc)
+	if err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, states)
+}
+
+func (h *handler) getRocket(w http.ResponseWriter, r *http.Request) {
+	state, err := h.svc.Get(r.Context(), r.PathValue("channel"))
+	if err != nil {
+		h.writeServiceError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, state)
+}
+
+func (h *handler) writeServiceError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, rocket.ErrInvalidMessage):
+		h.writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, rocket.ErrNotFound):
+		h.writeError(w, http.StatusNotFound, err.Error())
+	default:
+		h.log.Error("request failed", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func (h *handler) writeError(w http.ResponseWriter, status int, msg string) {
+	h.writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func (h *handler) writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		h.log.Error("encode response", "error", err)
+	}
+}
