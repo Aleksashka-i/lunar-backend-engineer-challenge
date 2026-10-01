@@ -20,6 +20,13 @@ Then send messages with the test program:
 State survives restarts. Flags: `-db <path>` for another database file, `-reset` to start
 with an empty one (`go run ./cmd/server -reset`).
 
+Or run it in Docker (state is kept in the `rockets-data` volume):
+
+```bash
+docker build -t rockets-service .
+docker run -p 8088:8088 -v rockets-data:/data rockets-service
+```
+
 ## API
 
 | Endpoint                | Description                                                                   |
