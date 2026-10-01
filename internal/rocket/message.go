@@ -6,6 +6,15 @@ import (
 	"time"
 )
 
+// Message types sent by rockets.
+const (
+	TypeLaunched       = "RocketLaunched"
+	TypeSpeedIncreased = "RocketSpeedIncreased"
+	TypeSpeedDecreased = "RocketSpeedDecreased"
+	TypeExploded       = "RocketExploded"
+	TypeMissionChanged = "RocketMissionChanged"
+)
+
 // Message is a single event reported by a rocket.
 type Message struct {
 	Metadata Metadata `json:"metadata"`
@@ -23,7 +32,7 @@ type Metadata struct {
 
 // Event is something that happened to a rocket and changes its state.
 type Event interface {
-	apply(s *State)
+	apply(r *Rocket)
 }
 
 // Launched is sent once, when the rocket is launched.
@@ -53,29 +62,29 @@ type MissionChanged struct {
 	NewMission string `json:"newMission"`
 }
 
-func (e Launched) apply(s *State) {
-	s.Status = StatusLaunched
-	s.Type = e.Type
-	s.Speed = e.LaunchSpeed
-	s.Mission = e.Mission
+func (e Launched) apply(r *Rocket) {
+	r.Status = StatusLaunched
+	r.Type = e.Type
+	r.Speed = e.LaunchSpeed
+	r.Mission = e.Mission
 }
 
-func (e SpeedIncreased) apply(s *State) { s.Speed += e.By }
-func (e SpeedDecreased) apply(s *State) { s.Speed -= e.By }
-func (e MissionChanged) apply(s *State) { s.Mission = e.NewMission }
+func (e SpeedIncreased) apply(r *Rocket) { r.Speed += e.By }
+func (e SpeedDecreased) apply(r *Rocket) { r.Speed -= e.By }
+func (e MissionChanged) apply(r *Rocket) { r.Mission = e.NewMission }
 
-func (e Exploded) apply(s *State) {
-	s.Status = StatusExploded
-	s.ExplosionReason = e.Reason
+func (e Exploded) apply(r *Rocket) {
+	r.Status = StatusExploded
+	r.ExplosionReason = e.Reason
 }
 
 // decoders maps each messageType to a decoder for its event.
 var decoders = map[string]func([]byte) (Event, error){
-	"RocketLaunched":       decode[Launched],
-	"RocketSpeedIncreased": decode[SpeedIncreased],
-	"RocketSpeedDecreased": decode[SpeedDecreased],
-	"RocketExploded":       decode[Exploded],
-	"RocketMissionChanged": decode[MissionChanged],
+	TypeLaunched:       decode[Launched],
+	TypeSpeedIncreased: decode[SpeedIncreased],
+	TypeSpeedDecreased: decode[SpeedDecreased],
+	TypeExploded:       decode[Exploded],
+	TypeMissionChanged: decode[MissionChanged],
 }
 
 func decode[E Event](data []byte) (Event, error) {

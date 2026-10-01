@@ -32,7 +32,7 @@ func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "invalid message: "+err.Error())
 		return
 	}
-	if _, err := h.svc.Ingest(r.Context(), m); err != nil {
+	if err := h.svc.ProcessMessage(r.Context(), m); err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
@@ -58,21 +58,21 @@ func (h *handler) listRockets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	states, err := h.svc.List(r.Context(), field, desc)
+	rockets, err := h.svc.List(r.Context(), field, desc)
 	if err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, states)
+	h.writeJSON(w, http.StatusOK, rockets)
 }
 
 func (h *handler) getRocket(w http.ResponseWriter, r *http.Request) {
-	state, err := h.svc.Get(r.Context(), r.PathValue("channel"))
+	found, err := h.svc.Get(r.Context(), r.PathValue("channel"))
 	if err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, state)
+	h.writeJSON(w, http.StatusOK, found)
 }
 
 func (h *handler) writeServiceError(w http.ResponseWriter, err error) {

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,25 +27,24 @@ const launched = `{
 	"message": {"type": "Falcon-9", "launchSpeed": 500, "mission": "ARTEMIS"}
 }`
 
-func newServer() http.Handler {
-	return httpapi.New(rocket.NewService(storage.NewMemory()), slog.New(slog.DiscardHandler))
-}
-
-func do(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
-	return rec
+func newServer(t *testing.T) http.Handler {
+	db, err := storage.OpenSQLite(filepath.Join(t.TempDir(), "rockets.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	return httpapi.New(rocket.NewService(db), slog.New(slog.DiscardHandler))
 }
 
 func TestPostMessageAndGetRocket(t *testing.T) {
-	h := newServer()
-	rec := do(h, http.MethodPost, "/messages", launched)
+	h := newServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(launched)))
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 
-	rec = do(h, http.MethodGet, "/rockets/193270a9-c9cf-404a-8f83-838e71d9ae67", "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rockets/193270a9-c9cf-404a-8f83-838e71d9ae67", nil))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var s rocket.State
+	var s rocket.Rocket
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &s))
 	assert.Equal(t, rocket.StatusLaunched, s.Status)
 	assert.Equal(t, "Falcon-9", s.Type)
@@ -55,22 +55,24 @@ func TestPostMessageAndGetRocket(t *testing.T) {
 // TestPostMessageEmptyResponse guards connection reuse: the rockets test client
 // never reads response bodies, so a body makes it open a connection per message.
 func TestPostMessageEmptyResponse(t *testing.T) {
-	h := newServer()
+	h := newServer(t)
 	for range 2 { // new, then duplicate
-		rec := do(h, http.MethodPost, "/messages", launched)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(launched)))
 		assert.Equal(t, http.StatusAccepted, rec.Code)
 		assert.Empty(t, rec.Body.String())
 	}
 }
 
 func TestListRockets(t *testing.T) {
-	h := newServer()
-	do(h, http.MethodPost, "/messages", launched)
+	h := newServer(t)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(launched)))
 
-	rec := do(h, http.MethodGet, "/rockets?sort=speed&order=desc", "")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rockets?sort=speed&order=desc", nil))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var states []rocket.State
+	var states []rocket.Rocket
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &states))
 	assert.Len(t, states, 1)
 }
@@ -88,7 +90,8 @@ func TestErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := do(newServer(), tt.method, tt.path, tt.body)
+			rec := httptest.NewRecorder()
+			newServer(t).ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body)))
 			assert.Equal(t, tt.want, rec.Code)
 		})
 	}

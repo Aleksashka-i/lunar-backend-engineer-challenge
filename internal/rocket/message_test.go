@@ -15,11 +15,11 @@ func TestMessageDecodesEventByType(t *testing.T) {
 		messageType, body string
 		want              rocket.Event
 	}{
-		{"RocketLaunched", `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`, rocket.Launched{Type: "Falcon-9", LaunchSpeed: 500, Mission: "ARTEMIS"}},
-		{"RocketSpeedIncreased", `{"by":3000}`, rocket.SpeedIncreased{By: 3000}},
-		{"RocketSpeedDecreased", `{"by":2500}`, rocket.SpeedDecreased{By: 2500}},
-		{"RocketExploded", `{"reason":"PRESSURE_VESSEL_FAILURE"}`, rocket.Exploded{Reason: "PRESSURE_VESSEL_FAILURE"}},
-		{"RocketMissionChanged", `{"newMission":"SHUTTLE_MIR"}`, rocket.MissionChanged{NewMission: "SHUTTLE_MIR"}},
+		{rocket.TypeLaunched, `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`, rocket.Launched{Type: "Falcon-9", LaunchSpeed: 500, Mission: "ARTEMIS"}},
+		{rocket.TypeSpeedIncreased, `{"by":3000}`, rocket.SpeedIncreased{By: 3000}},
+		{rocket.TypeSpeedDecreased, `{"by":2500}`, rocket.SpeedDecreased{By: 2500}},
+		{rocket.TypeExploded, `{"reason":"PRESSURE_VESSEL_FAILURE"}`, rocket.Exploded{Reason: "PRESSURE_VESSEL_FAILURE"}},
+		{rocket.TypeMissionChanged, `{"newMission":"SHUTTLE_MIR"}`, rocket.MissionChanged{NewMission: "SHUTTLE_MIR"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.messageType, func(t *testing.T) {

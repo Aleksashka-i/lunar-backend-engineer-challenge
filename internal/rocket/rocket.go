@@ -19,11 +19,11 @@ type MessageStatus string
 const (
 	MessageApplied   MessageStatus = "applied"   // applied to the rocket's state
 	MessagePending   MessageStatus = "pending"   // waiting for an earlier message
-	MessageDuplicate MessageStatus = "duplicate" // already applied or pending, ignored
+	MessageDuplicate MessageStatus = "duplicate" // already applied, ignored
 )
 
-// State is the current state of a rocket, derived from its messages.
-type State struct {
+// Rocket is the current state of a rocket, derived from its messages.
+type Rocket struct {
 	Channel           string    `json:"channel"`
 	Status            Status    `json:"status"`
 	Type              string    `json:"type"`
@@ -34,42 +34,30 @@ type State struct {
 	LastMessageTime   time.Time `json:"lastMessageTime"`
 }
 
-// Rocket is a rocket's state plus the messages that arrived ahead of a missing
-// predecessor and are waiting to be applied.
-type Rocket struct {
-	State
-	Pending map[int]Message
-}
-
 // NewRocket creates a rocket for channel that has not launched yet.
-func NewRocket(channel string) *Rocket {
-	return &Rocket{State: State{Channel: channel, Status: StatusAwaitingLaunch}}
+func NewRocket(channel string) Rocket {
+	return Rocket{Channel: channel, Status: StatusAwaitingLaunch}
 }
 
-// Receive applies m in messageNumber order, holding early messages and ignoring duplicates.
-func (r *Rocket) Receive(m Message) MessageStatus {
-	number := m.Metadata.MessageNumber
-	if _, pending := r.Pending[number]; pending || number <= r.LastMessageNumber {
+// Apply applies m if it is the next message, and reports whether it was applied, is early or is a repeat.
+func (r *Rocket) Apply(m Message) MessageStatus {
+	switch number := m.Metadata.MessageNumber; {
+	case number <= r.LastMessageNumber:
 		return MessageDuplicate
+	case number > r.LastMessageNumber+1:
+		return MessagePending
 	}
-	if r.Pending == nil {
-		r.Pending = make(map[int]Message)
-	}
-	r.Pending[number] = m
+	m.Event.apply(r)
+	r.LastMessageNumber = m.Metadata.MessageNumber
+	r.LastMessageTime = m.Metadata.MessageTime
+	return MessageApplied
+}
 
-	for {
-		next, ok := r.Pending[r.LastMessageNumber+1]
-		if !ok {
-			break
+// ApplyPending applies pending messages, sorted by number, that follow the last applied one, stopping at the first gap.
+func (r *Rocket) ApplyPending(pending []Message) {
+	for _, m := range pending {
+		if r.Apply(m) == MessagePending {
+			return
 		}
-		delete(r.Pending, next.Metadata.MessageNumber)
-		next.Event.apply(&r.State)
-		r.LastMessageNumber = next.Metadata.MessageNumber
-		r.LastMessageTime = next.Metadata.MessageTime
 	}
-
-	if number <= r.LastMessageNumber {
-		return MessageApplied
-	}
-	return MessagePending
 }

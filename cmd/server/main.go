@@ -19,11 +19,28 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8088", "address to listen on")
+	dbPath := flag.String("db", "rockets.db", "SQLite database file")
+	reset := flag.Bool("reset", false, "delete all stored state before starting")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	svc := rocket.NewService(storage.NewMemory())
+	db, err := storage.OpenSQLite(*dbPath)
+	if err != nil {
+		log.Error("open database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if *reset {
+		if err := db.Reset(context.Background()); err != nil {
+			log.Error("reset database", "error", err)
+			os.Exit(1)
+		}
+		log.Info("database reset", "path", *dbPath)
+	}
+
+	svc := rocket.NewService(db)
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           httpapi.New(svc, log),
