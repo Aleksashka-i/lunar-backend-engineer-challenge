@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -9,6 +10,9 @@ import (
 
 	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/rocket"
 )
+
+//go:embed dashboard.html
+var dashboard []byte
 
 type handler struct {
 	svc *rocket.Service
@@ -23,6 +27,7 @@ func New(svc *rocket.Service, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /messages", h.postMessage)
 	mux.HandleFunc("GET /rockets", h.listRockets)
 	mux.HandleFunc("GET /rockets/{channel}", h.getRocket)
+	mux.HandleFunc("GET /{$}", h.getDashboard)
 	return mux
 }
 
@@ -73,6 +78,11 @@ func (h *handler) getRocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, found)
+}
+
+func (h *handler) getDashboard(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(dashboard)
 }
 
 func (h *handler) writeServiceError(w http.ResponseWriter, err error) {

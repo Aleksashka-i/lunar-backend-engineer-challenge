@@ -96,3 +96,16 @@ func TestErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestDashboard(t *testing.T) {
+	h := newServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+	assert.Contains(t, rec.Body.String(), "<title>Rockets</title>")
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown", nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}

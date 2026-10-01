@@ -162,3 +162,40 @@ func TestListSorted(t *testing.T) {
 		assert.Equal(t, tt.want, got, "List(%s, desc=%v)", tt.field, tt.desc)
 	}
 }
+
+func TestListSortedByStatusAndMessages(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newService(t)
+	process(t, svc,
+		// a: exploded after 2 messages
+		msg("a", 1, rocket.TypeLaunched, rocket.Launched{Type: "Falcon-9", LaunchSpeed: 300, Mission: "GEMINI"}),
+		msg("a", 2, rocket.TypeExploded, rocket.Exploded{Reason: "PRESSURE_VESSEL_FAILURE"}),
+		// b: launched, 3 messages
+		msg("b", 1, rocket.TypeLaunched, rocket.Launched{Type: "Atlas-H", LaunchSpeed: 100, Mission: "APOLLO"}),
+		msg("b", 2, rocket.TypeSpeedIncreased, rocket.SpeedIncreased{By: 1}),
+		msg("b", 3, rocket.TypeSpeedIncreased, rocket.SpeedIncreased{By: 1}),
+		// c: awaiting launch, no messages applied yet
+		msg("c", 2, rocket.TypeSpeedIncreased, rocket.SpeedIncreased{By: 1}),
+	)
+
+	tests := []struct {
+		field rocket.SortField
+		desc  bool
+		want  []string
+	}{
+		{rocket.SortByStatus, false, []string{"c", "b", "a"}}, // awaiting launch, launched, exploded
+		{rocket.SortByStatus, true, []string{"a", "b", "c"}},
+		{rocket.SortByLastMessageNumber, false, []string{"c", "a", "b"}},
+		{rocket.SortByLastMessageNumber, true, []string{"b", "a", "c"}},
+	}
+	for _, tt := range tests {
+		rockets, err := svc.List(ctx, tt.field, tt.desc)
+		require.NoError(t, err)
+
+		var got []string
+		for _, r := range rockets {
+			got = append(got, r.Channel)
+		}
+		assert.Equal(t, tt.want, got, "List(%s, desc=%v)", tt.field, tt.desc)
+	}
+}

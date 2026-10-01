@@ -17,6 +17,8 @@ Then send messages with the test program:
 ./rockets launch "http://localhost:8088/messages"
 ```
 
+Open http://localhost:8088/ for a dashboard that refreshes every 2 seconds.
+
 State survives restarts. Flags: `-db <path>` for another database file, `-reset` to start
 with an empty one (`go run ./cmd/server -reset`).
 
@@ -29,11 +31,11 @@ docker run -p 8088:8088 -v rockets-data:/data rockets-service
 
 ## API
 
-| Endpoint                | Description                                                                   |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| `POST /messages`        | Ingest a message. `202` on success, `400` if invalid.                         |
-| `GET /rockets`          | All rockets. `sort` = `channel` (default), `type`, `mission`, `speed`; `order` = `asc` (default), `desc`. |
-| `GET /rockets/{channel}`| One rocket, or `404`.                                                         |
+| Endpoint                 | Description                                                                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /messages`         | Ingest a message. `202` on success, `400` if invalid.                                                                                    |
+| `GET /rockets`           | All rockets. `sort` = `channel` (default), `type`, `mission`, `speed`, `status`, `lastMessageNumber`; `order` = `asc` (default), `desc`. |
+| `GET /rockets/{channel}` | One rocket, or `404`.                                                                                                                    |
 
 ```bash
 curl "http://localhost:8088/rockets"

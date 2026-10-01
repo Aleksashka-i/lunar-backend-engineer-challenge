@@ -42,10 +42,12 @@ type TxStore interface {
 type SortField string
 
 const (
-	SortByChannel SortField = "channel"
-	SortByType    SortField = "type"
-	SortByMission SortField = "mission"
-	SortBySpeed   SortField = "speed"
+	SortByChannel           SortField = "channel"
+	SortByType              SortField = "type"
+	SortByMission           SortField = "mission"
+	SortBySpeed             SortField = "speed"
+	SortByStatus            SortField = "status"
+	SortByLastMessageNumber SortField = "lastMessageNumber"
 )
 
 // ParseSortField parses a sort field, defaulting to SortByChannel when empty.
@@ -53,7 +55,7 @@ func ParseSortField(s string) (SortField, error) {
 	switch f := SortField(s); f {
 	case "":
 		return SortByChannel, nil
-	case SortByChannel, SortByType, SortByMission, SortBySpeed:
+	case SortByChannel, SortByType, SortByMission, SortBySpeed, SortByStatus, SortByLastMessageNumber:
 		return f, nil
 	default:
 		return "", fmt.Errorf("unknown sort field %q", s)
@@ -130,6 +132,9 @@ func (s *Service) List(ctx context.Context, field SortField, desc bool) ([]Rocke
 	return rockets, nil
 }
 
+// statusOrder sorts statuses by lifecycle rather than alphabetically.
+var statusOrder = map[Status]int{StatusAwaitingLaunch: 0, StatusLaunched: 1, StatusExploded: 2}
+
 func compare(a, b Rocket, field SortField) int {
 	switch field {
 	case SortByType:
@@ -138,6 +143,10 @@ func compare(a, b Rocket, field SortField) int {
 		return cmp.Compare(a.Mission, b.Mission)
 	case SortBySpeed:
 		return cmp.Compare(a.Speed, b.Speed)
+	case SortByStatus:
+		return cmp.Compare(statusOrder[a.Status], statusOrder[b.Status])
+	case SortByLastMessageNumber:
+		return cmp.Compare(a.LastMessageNumber, b.LastMessageNumber)
 	default:
 		return cmp.Compare(a.Channel, b.Channel)
 	}

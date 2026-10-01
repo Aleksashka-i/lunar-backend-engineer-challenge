@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rockets</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+<style>
+  :root {
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --hairline: #e1e0d9;
+    --border: rgba(11, 11, 11, 0.10);
+    --good: #0ca30c;
+    --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink: #ffffff;
+      --ink-2: #c3c2b7;
+      --hairline: #2c2c2a;
+      --border: rgba(255, 255, 255, 0.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px;
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  #updated { color: var(--ink-2); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tile { padding: 16px; }
+  .tile .label { color: var(--ink-2); }
+  .tile .value { font-size: 32px; font-weight: 600; margin-top: 4px; }
+  .table-card { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+  th { color: var(--ink-2); font-weight: 600; }
+  th button { all: unset; cursor: pointer; }
+  th button:focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .channel { color: var(--ink-2); }
+  .icon { margin-right: 6px; }
+  .empty { padding: 24px; color: var(--ink-2); text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><span aria-hidden="true">🚀</span> Rockets</h1>
+    <span id="updated" aria-live="polite">Loading…</span>
+  </header>
+
+  <section class="tiles" aria-label="Summary">
+    <div class="card tile"><div class="label">Rockets</div><div class="value" id="total">–</div></div>
+    <div class="card tile"><div class="label">Launched</div><div class="value" id="launched">–</div></div>
+    <div class="card tile"><div class="label">Exploded</div><div class="value" id="exploded">–</div></div>
+    <div class="card tile"><div class="label">Awaiting launch</div><div class="value" id="awaiting_launch">–</div></div>
+  </section>
+
+  <section class="card table-card">
+    <table>
+      <thead><tr id="head"></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>No rockets yet. Send messages to <code>POST /messages</code>.</div>
+  </section>
+</main>
+
+<script>
+  // Columns with a sort key can be sorted by the API (GET /rockets?sort=…&order=…).
+  const columns = [
+    { key: "channel", label: "Rocket", sort: "channel" },
+    { key: "type", label: "Type", sort: "type" },
+    { key: "mission", label: "Mission", sort: "mission" },
+    { key: "status", label: "Status", sort: "status" },
+    { key: "speed", label: "Speed", sort: "speed", num: true },
+    { key: "lastMessageNumber", label: "Messages", sort: "lastMessageNumber", num: true },
+    { key: "lastMessageTime", label: "Last message" },
+  ];
+  // Status is shown as an icon plus a label, so it never relies on color alone.
+  const statuses = {
+    launched: { icon: "▲", label: "Launched", color: "var(--good)" },
+    exploded: { icon: "✕", label: "Exploded", color: "var(--critical)" },
+    awaiting_launch: { icon: "◷", label: "Awaiting launch", color: "var(--muted)" },
+  };
+
+  let sort = "speed";
+  let order = "desc";
+  let timer;
+
+  function renderHead() {
+    const head = document.getElementById("head");
+    head.replaceChildren(...columns.map((col) => {
+      const th = document.createElement("th");
+      if (col.num) th.className = "num";
+      if (!col.sort) {
+        th.textContent = col.label;
+        return th;
+      }
+      const active = col.sort === sort;
+      th.setAttribute("aria-sort", active ? (order === "asc" ? "ascending" : "descending") : "none");
+      const button = document.createElement("button");
+      button.textContent = col.label + (active ? (order === "asc" ? " ↑" : " ↓") : "");
+      button.addEventListener("click", () => {
+        if (active) {
+          order = order === "asc" ? "desc" : "asc";
+        } else {
+          sort = col.sort;
+          order = col.num ? "desc" : "asc";
+        }
+        renderHead();
+        refresh();
+      });
+      th.append(button);
+      return th;
+    }));
+  }
+
+  function cell(rocket, col) {
+    const td = document.createElement("td");
+    const value = rocket[col.key];
+    if (col.num) td.className = "num";
+    switch (col.key) {
+      case "channel":
+        td.className = "channel";
+        td.title = value;
+        td.textContent = value.slice(0, 8);
+        break;
+      case "status": {
+        const status = statuses[value] || { icon: "•", label: value, color: "var(--muted)" };
+        const icon = document.createElement("span");
+        icon.className = "icon";
+        icon.style.color = status.color;
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = status.icon;
+        const reason = rocket.explosionReason ? ` (${rocket.explosionReason})` : "";
+        td.append(icon, status.label + reason);
+        break;
+      }
+      case "speed":
+        td.textContent = rocket.status === "awaiting_launch" ? "–" : value.toLocaleString();
+        break;
+      case "lastMessageNumber":
+        td.textContent = value.toLocaleString();
+        break;
+      case "lastMessageTime":
+        td.textContent = rocket.lastMessageNumber > 0 ? new Date(value).toLocaleTimeString() : "–";
+        break;
+      default:
+        td.textContent = value === "" || value === undefined ? "–" : value;
+    }
+    return td;
+  }
+
+  function render(rockets) {
+    for (const status of Object.keys(statuses)) {
+      document.getElementById(status).textContent = rockets.filter((r) => r.status === status).length.toLocaleString();
+    }
+    document.getElementById("total").textContent = rockets.length.toLocaleString();
+    document.getElementById("rows").replaceChildren(...rockets.map((rocket) => {
+      const tr = document.createElement("tr");
+      tr.append(...columns.map((col) => cell(rocket, col)));
+      return tr;
+    }));
+    document.getElementById("empty").hidden = rockets.length > 0;
+  }
+
+  async function refresh() {
+    clearTimeout(timer);
+    const updated = document.getElementById("updated");
+    try {
+      const response = await fetch(`/rockets?sort=${sort}&order=${order}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      render(await response.json());
+      updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    } catch (err) {
+      updated.textContent = `Can't reach the service (${err.message}); retrying…`;
+    }
+    timer = setTimeout(refresh, 2000);
+  }
+
+  renderHead();
+  refresh();
+</script>
+</body>
+</html>
