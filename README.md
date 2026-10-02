@@ -89,27 +89,26 @@ curl "http://localhost:8088/rockets?sort=speed&order=desc"
 
 ## Design
 
-The service is designed around a simple guarantee: **messages for each rocket are applied exactly once and in sequence**, even when they are delivered more than once or arrive out of order.
+The service separates message processing rules from HTTP handling and storage. The domain defines how messages change rocket state, while SQLite provides durable and atomic processing. Duplicate and out-of-order messages are handled while preserving per-rocket ordering.
 
 ![Architecture](docs/architecture.png)
 
-Each rocket tracks the last message it successfully applied. Duplicate or already-processed messages are ignored, the next expected message is applied immediately, and messages that arrive ahead of their turn are persisted until the missing messages arrive. Once a gap is filled, any consecutive pending messages are applied as well. This means the final rocket state is equivalent to processing the same messages once, in order.
 
 The implementation is split into three main layers:
 
+- **HTTP (`internal/httpapi`)** — exposes the service over HTTP, handles JSON requests and responses, and serves a small dashboard.
 - **Domain (`internal/rocket`)** — defines rockets, messages, validation, and the rules for applying events. It contains no persistence or HTTP concerns.
 - **Storage (`internal/storage`)** — provides durable SQLite persistence for rocket state and out-of-order messages. Processing a message and updating the resulting state happens atomically within a transaction.
-- **HTTP (`internal/httpapi`)** — exposes the service over HTTP, handles JSON requests and responses, and serves a small dashboard.
 
 ### Persistence and failure handling
 
-The sender retries messages until they are acknowledged, so the service persists accepted messages before returning `202`. SQLite stores both the current rocket state and messages waiting for an earlier message to arrive.
+The sender retries messages until they are acknowledged, so the service persists accepted messages before returning `202`. SQLite stores both the current rocket state (`rockets` table) and messages waiting for an earlier message to arrive (`pending_messages` table).
 
-Message processing is transactional: either the complete state transition is committed or none of it is. If the service crashes before committing, the sender can safely retry the message.
+Message processing is transactional: either the complete state transition (rocket state is updated, applied pending messages are removed) is committed or none of it is. If the service crashes before committing, the sender can safely retry the message.
 
 ### Concurrency
 
-SQLite allows only one writer at a time. The service embraces this constraint rather than adding application-level locking: writes are serialized by the database, while WAL mode allows reads to proceed concurrently with a writer.
+SQLite allows only one writer at a time. So writes are serialized by the database, while WAL mode allows reads to proceed concurrently with a writer.
 
 ### Message processing
 
