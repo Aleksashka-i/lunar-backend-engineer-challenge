@@ -152,8 +152,8 @@ Rockets are independent, so different rockets can be processed concurrently.
 - **Reads.** Move sorting and pagination into the database and add appropriate indexes as the dataset grows.
 - **Pending messages.** A stalled rocket can accumulate an unbounded backlog. Monitor its size and age and define a recovery policy.
 
-## How I used AI
+## AI Usage disclosure
 
 I used Claude Code to assist with implementation. I defined the architecture, behavior, and key design decisions, and reviewed and adapted generated code before including it.
 
-The dashboard UI was generated largely by AI by design, as it is an optional convenience around the core implementation rather than part of the challenge itself. AI also helped generate the GitHub Actions workflow and some tests.
+The dashboard UI was generated largely by AI by design (sugar). AI also helped generate the GitHub Actions workflow and some tests.
