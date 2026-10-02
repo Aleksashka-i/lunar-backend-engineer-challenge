@@ -11,34 +11,20 @@ import (
 // ErrNotFound is returned when a rocket does not exist.
 var ErrNotFound = errors.New("rocket not found")
 
-// ErrInvalidMessage is returned when a message cannot be processed.
+// ErrInvalidMessage is returned when a message fails validation.
 var ErrInvalidMessage = errors.New("invalid message")
 
-// Store persists rockets and the messages waiting to be applied to them.
+// Store persists rockets and the messages awaiting earlier ones.
 type Store interface {
-	// WithTx runs fn in one transaction, committing if fn returns nil and rolling back otherwise.
-	WithTx(ctx context.Context, fn func(tx TxStore) error) error
+	// ProcessMessage atomically applies m and any pending messages that follow it, using apply; calls for the same rocket must be serialized.
+	ProcessMessage(ctx context.Context, m Message, apply func(r *Rocket, m Message) MessageStatus) (MessageStatus, error)
 	// GetRocket returns one rocket, or ErrNotFound.
 	GetRocket(ctx context.Context, channel string) (Rocket, error)
-	// ListRockets returns all rockets in no particular order.
+	// ListRockets returns all rockets in unspecified order.
 	ListRockets(ctx context.Context) ([]Rocket, error)
 }
 
-// TxStore is the Store inside a transaction; it is only valid during the WithTx call that provides it.
-type TxStore interface {
-	// GetRocket returns one rocket, or ErrNotFound.
-	GetRocket(ctx context.Context, channel string) (Rocket, error)
-	// GetPendingMessages returns the messages waiting for channel's rocket, ordered by number.
-	GetPendingMessages(ctx context.Context, channel string) ([]Message, error)
-	// SaveRocket creates or replaces a rocket.
-	SaveRocket(ctx context.Context, r Rocket) error
-	// SavePendingMessage stores m to wait for an earlier message; a message already pending is kept.
-	SavePendingMessage(ctx context.Context, m Message) error
-	// DeletePendingMessages deletes channel's pending messages numbered up to throughNumber.
-	DeletePendingMessages(ctx context.Context, channel string, throughNumber int) error
-}
-
-// SortField is the rocket attribute a list is sorted by.
+// SortField is a rocket attribute to sort by.
 type SortField string
 
 const (
@@ -48,72 +34,46 @@ const (
 	SortBySpeed             SortField = "speed"
 	SortByStatus            SortField = "status"
 	SortByLastMessageNumber SortField = "lastMessageNumber"
+	SortByPendingMessages   SortField = "pendingMessages"
 )
 
-// ParseSortField parses a sort field, defaulting to SortByChannel when empty.
+// ParseSortField parses s as a SortField; an empty string yields SortByChannel.
 func ParseSortField(s string) (SortField, error) {
 	switch f := SortField(s); f {
 	case "":
 		return SortByChannel, nil
-	case SortByChannel, SortByType, SortByMission, SortBySpeed, SortByStatus, SortByLastMessageNumber:
+	case SortByChannel, SortByType, SortByMission, SortBySpeed, SortByStatus, SortByLastMessageNumber, SortByPendingMessages:
 		return f, nil
 	default:
 		return "", fmt.Errorf("unknown sort field %q", s)
 	}
 }
 
-// Service processes messages and queries rockets.
+// Service processes incoming messages and serves rocket queries.
 type Service struct {
 	store Store
 }
 
-// NewService creates a Service backed by store.
+// NewService returns a Service backed by store.
 func NewService(store Store) *Service {
 	return &Service{store: store}
 }
 
-// ProcessMessage applies m and the pending messages after it, or stores m as pending if it is early, in one transaction.
+// ProcessMessage validates m and applies it to its rocket.
 func (s *Service) ProcessMessage(ctx context.Context, m Message) error {
-	if err := validate(m); err != nil {
+	if err := m.Validate(); err != nil {
 		return err
 	}
-	channel := m.Metadata.Channel
-
-	return s.store.WithTx(ctx, func(tx TxStore) error {
-		r, err := tx.GetRocket(ctx, channel)
-		if errors.Is(err, ErrNotFound) {
-			r = NewRocket(channel)
-		} else if err != nil {
-			return err
-		}
-
-		switch r.Apply(m) {
-		case MessageDuplicate:
-			return nil
-		case MessagePending:
-			if err := tx.SavePendingMessage(ctx, m); err != nil {
-				return err
-			}
-		case MessageApplied:
-			pending, err := tx.GetPendingMessages(ctx, channel)
-			if err != nil {
-				return err
-			}
-			r.ApplyPending(pending)
-			if err := tx.DeletePendingMessages(ctx, channel, r.LastMessageNumber); err != nil {
-				return err
-			}
-		}
-		return tx.SaveRocket(ctx, r)
-	})
+	_, err := s.store.ProcessMessage(ctx, m, (*Rocket).Apply)
+	return err
 }
 
-// Get returns one rocket.
+// Get returns the rocket for channel, or ErrNotFound.
 func (s *Service) Get(ctx context.Context, channel string) (Rocket, error) {
 	return s.store.GetRocket(ctx, channel)
 }
 
-// List returns all rockets sorted by field, descending if desc.
+// List returns all rockets sorted by field, in descending order if desc is true.
 func (s *Service) List(ctx context.Context, field SortField, desc bool) ([]Rocket, error) {
 	rockets, err := s.store.ListRockets(ctx)
 	if err != nil {
@@ -132,7 +92,7 @@ func (s *Service) List(ctx context.Context, field SortField, desc bool) ([]Rocke
 	return rockets, nil
 }
 
-// statusOrder sorts statuses by lifecycle rather than alphabetically.
+// statusOrder orders statuses by lifecycle stage rather than alphabetically.
 var statusOrder = map[Status]int{StatusAwaitingLaunch: 0, StatusLaunched: 1, StatusExploded: 2}
 
 func compare(a, b Rocket, field SortField) int {
@@ -147,19 +107,9 @@ func compare(a, b Rocket, field SortField) int {
 		return cmp.Compare(statusOrder[a.Status], statusOrder[b.Status])
 	case SortByLastMessageNumber:
 		return cmp.Compare(a.LastMessageNumber, b.LastMessageNumber)
+	case SortByPendingMessages:
+		return cmp.Compare(a.PendingMessages, b.PendingMessages)
 	default:
 		return cmp.Compare(a.Channel, b.Channel)
 	}
-}
-
-func validate(m Message) error {
-	switch {
-	case m.Metadata.Channel == "":
-		return fmt.Errorf("%w: missing channel", ErrInvalidMessage)
-	case m.Metadata.MessageNumber < 1:
-		return fmt.Errorf("%w: messageNumber must be positive", ErrInvalidMessage)
-	case m.Event == nil:
-		return fmt.Errorf("%w: missing event", ErrInvalidMessage)
-	}
-	return nil
 }

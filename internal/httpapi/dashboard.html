@@ -69,6 +69,7 @@
     <div class="card tile"><div class="label">Launched</div><div class="value" id="launched">–</div></div>
     <div class="card tile"><div class="label">Exploded</div><div class="value" id="exploded">–</div></div>
     <div class="card tile"><div class="label">Awaiting launch</div><div class="value" id="awaiting_launch">–</div></div>
+    <div class="card tile"><div class="label">Pending messages</div><div class="value" id="pending">–</div></div>
   </section>
 
   <section class="card table-card">
@@ -81,7 +82,7 @@
 </main>
 
 <script>
-  // Columns with a sort key can be sorted by the API (GET /rockets?sort=…&order=…).
+  // Columns with a sort key are sorted by the API (GET /rockets?sort=…&order=…).
   const columns = [
     { key: "channel", label: "Rocket", sort: "channel" },
     { key: "type", label: "Type", sort: "type" },
@@ -89,9 +90,10 @@
     { key: "status", label: "Status", sort: "status" },
     { key: "speed", label: "Speed", sort: "speed", num: true },
     { key: "lastMessageNumber", label: "Messages", sort: "lastMessageNumber", num: true },
+    { key: "pendingMessages", label: "Pending", sort: "pendingMessages", num: true },
     { key: "lastMessageTime", label: "Last message" },
   ];
-  // Status is shown as an icon plus a label, so it never relies on color alone.
+  // Status is shown as an icon and a label so that it never relies on color alone.
   const statuses = {
     launched: { icon: "▲", label: "Launched", color: "var(--good)" },
     exploded: { icon: "✕", label: "Exploded", color: "var(--critical)" },
@@ -155,6 +157,7 @@
         td.textContent = rocket.status === "awaiting_launch" ? "–" : value.toLocaleString();
         break;
       case "lastMessageNumber":
+      case "pendingMessages":
         td.textContent = value.toLocaleString();
         break;
       case "lastMessageTime":
@@ -171,6 +174,7 @@
       document.getElementById(status).textContent = rockets.filter((r) => r.status === status).length.toLocaleString();
     }
     document.getElementById("total").textContent = rockets.length.toLocaleString();
+    document.getElementById("pending").textContent = rockets.reduce((sum, r) => sum + r.pendingMessages, 0).toLocaleString();
     document.getElementById("rows").replaceChildren(...rockets.map((rocket) => {
       const tr = document.createElement("tr");
       tr.append(...columns.map((col) => cell(rocket, col)));

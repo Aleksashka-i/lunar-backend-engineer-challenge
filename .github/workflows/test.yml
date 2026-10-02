@@ -15,3 +15,42 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test -race ./...
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build -o bin/server ./cmd/server
+      - name: Start the service
+        run: |
+          ./bin/server -db "$RUNNER_TEMP/rockets.db" > "$RUNNER_TEMP/server.log" 2>&1 &
+          curl --silent --retry 20 --retry-connrefused --retry-delay 1 --fail http://localhost:8088/rockets
+      - name: Post messages out of order, with a repeat
+        run: |
+          post() {
+            curl --silent --fail -X POST http://localhost:8088/messages -d "$1" -o /dev/null -w '%{http_code}\n'
+          }
+          post '{"metadata":{"channel":"ch1","messageNumber":2,"messageTime":"2022-02-02T19:39:06Z","messageType":"RocketSpeedIncreased"},"message":{"by":3000}}'
+          post '{"metadata":{"channel":"ch1","messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}}'
+          post '{"metadata":{"channel":"ch1","messageNumber":2,"messageTime":"2022-02-02T19:39:06Z","messageType":"RocketSpeedIncreased"},"message":{"by":3000}}'
+          post '{"metadata":{"channel":"ch2","messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"Atlas-H","launchSpeed":100,"mission":"APOLLO"}}'
+      - name: Query rockets
+        run: |
+          rocket=$(curl --silent --fail http://localhost:8088/rockets/ch1)
+          echo "$rocket"
+          test "$(echo "$rocket" | jq -r .status)" = launched
+          test "$(echo "$rocket" | jq -r .speed)" = 3500
+          test "$(echo "$rocket" | jq -r .lastMessageNumber)" = 2
+
+          rockets=$(curl --silent --fail "http://localhost:8088/rockets?sort=speed&order=desc")
+          echo "$rockets"
+          test "$(echo "$rockets" | jq -r '[.[].channel] | join(",")')" = ch1,ch2
+
+          test "$(curl --silent -o /dev/null -w '%{http_code}' http://localhost:8088/rockets/unknown)" = 404
+          test "$(curl --silent -o /dev/null -w '%{http_code}' -X POST http://localhost:8088/messages -d '{')" = 400
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log"

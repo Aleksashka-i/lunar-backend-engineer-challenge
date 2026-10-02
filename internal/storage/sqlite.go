@@ -1,4 +1,4 @@
-// Package storage implements rocket.Store.
+// Package storage implements rocket.Store on SQLite.
 package storage
 
 import (
@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/rocket"
+	"lunar-backend-engineer-challenge/internal/rocket"
 )
 
 const schema = `
@@ -36,9 +36,16 @@ CREATE TABLE IF NOT EXISTS pending_messages (
 
 const rocketColumns = `channel, status, type, mission, speed, explosion_reason, last_message_number, last_message_time`
 
-// SQLite is a rocket.Store stored in a SQLite database file, so state survives restarts.
-// SQLite allows one writer at a time, so transactions share a single connection and never
-// conflict; reads use a separate read-only pool and, in WAL mode, run in parallel.
+// selectRockets reads rocketColumns plus the number of pending messages for each rocket.
+const selectRockets = `SELECT ` + rocketColumns + `,
+	(SELECT COUNT(*) FROM pending_messages p WHERE p.channel = rockets.channel)
+FROM rockets`
+
+const selectRocket = selectRockets + ` WHERE channel = ?`
+
+// SQLite is a rocket.Store backed by a SQLite database file. SQLite permits a single writer,
+// so all transactions share one connection and are serialized; reads use a separate read-only
+// connection pool and, in WAL mode, run concurrently with writes.
 type SQLite struct {
 	write *sql.DB
 	read  *sql.DB
@@ -52,8 +59,6 @@ func OpenSQLite(path string) (*SQLite, error) {
 	if err != nil {
 		return nil, err
 	}
-	// BEGIN IMMEDIATE takes the write lock up front, so a write waits for busy_timeout
-	// instead of failing with SQLITE_BUSY when upgrading from a read.
 	write.SetMaxOpenConns(1)
 	if _, err := write.Exec(schema); err != nil {
 		write.Close()
@@ -81,28 +86,58 @@ func (s *SQLite) Close() error {
 	return errors.Join(s.read.Close(), s.write.Close())
 }
 
-// WithTx runs fn in one transaction, committing if fn returns nil and rolling back otherwise.
-func (s *SQLite) WithTx(ctx context.Context, fn func(tx rocket.TxStore) error) error {
+// ProcessMessage atomically applies m and any pending messages that follow it, using apply.
+func (s *SQLite) ProcessMessage(ctx context.Context, m rocket.Message, apply func(r *rocket.Rocket, m rocket.Message) rocket.MessageStatus) (rocket.MessageStatus, error) {
 	tx, err := s.write.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer tx.Rollback() // no-op after Commit; also rolls back if fn panics
+	defer tx.Rollback() // no effect after Commit; ensures rollback on error or panic
 
-	if err := fn(sqliteTx{tx: tx}); err != nil {
-		return err
+	channel := m.Metadata.Channel
+	r, err := scanRocket(tx.QueryRowContext(ctx, selectRocket, channel))
+	if errors.Is(err, rocket.ErrNotFound) {
+		r = rocket.NewRocket(channel)
+	} else if err != nil {
+		return "", err
 	}
-	return tx.Commit()
+
+	status := apply(&r, m)
+	switch status {
+	case rocket.MessagePending:
+		if err := savePending(ctx, tx, m); err != nil {
+			return "", err
+		}
+	case rocket.MessageApplied:
+		// Apply pending messages that now follow in sequence, until a gap.
+		for {
+			next, ok, err := takePending(ctx, tx, channel, r.LastMessageNumber+1)
+			if err != nil {
+				return "", err
+			}
+			if !ok || apply(&r, next) != rocket.MessageApplied {
+				break
+			}
+		}
+	case rocket.MessageDuplicate:
+		return status, nil // nothing to persist
+	default:
+		return "", fmt.Errorf("unexpected message status %q", status)
+	}
+	if err := saveRocket(ctx, tx, r); err != nil {
+		return "", err
+	}
+	return status, tx.Commit()
 }
 
 // GetRocket returns one rocket, or rocket.ErrNotFound.
 func (s *SQLite) GetRocket(ctx context.Context, channel string) (rocket.Rocket, error) {
-	return getRocket(ctx, s.read, channel)
+	return scanRocket(s.read.QueryRowContext(ctx, selectRocket, channel))
 }
 
 // ListRockets returns all rockets in no particular order.
 func (s *SQLite) ListRockets(ctx context.Context) ([]rocket.Rocket, error) {
-	rows, err := s.read.QueryContext(ctx, `SELECT `+rocketColumns+` FROM rockets`)
+	rows, err := s.read.QueryContext(ctx, selectRockets)
 	if err != nil {
 		return nil, err
 	}
@@ -119,86 +154,56 @@ func (s *SQLite) ListRockets(ctx context.Context) ([]rocket.Rocket, error) {
 	return rockets, rows.Err()
 }
 
-// sqliteTx is rocket.TxStore inside a WithTx transaction.
-type sqliteTx struct {
-	tx *sql.Tx
-}
-
-// GetRocket returns one rocket, or rocket.ErrNotFound.
-func (t sqliteTx) GetRocket(ctx context.Context, channel string) (rocket.Rocket, error) {
-	return getRocket(ctx, t.tx, channel)
-}
-
-// GetPendingMessages returns the messages waiting for channel's rocket, ordered by number.
-func (t sqliteTx) GetPendingMessages(ctx context.Context, channel string) ([]rocket.Message, error) {
-	rows, err := t.tx.QueryContext(ctx, `SELECT message FROM pending_messages WHERE channel = ? ORDER BY message_number`, channel)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var messages []rocket.Message
-	for rows.Next() {
-		var data string
-		if err := rows.Scan(&data); err != nil {
-			return nil, err
-		}
-		var m rocket.Message
-		if err := json.Unmarshal([]byte(data), &m); err != nil {
-			return nil, fmt.Errorf("decode pending message: %w", err)
-		}
-		messages = append(messages, m)
-	}
-	return messages, rows.Err()
-}
-
-// SaveRocket creates or replaces a rocket.
-func (t sqliteTx) SaveRocket(ctx context.Context, r rocket.Rocket) error {
-	_, err := t.tx.ExecContext(ctx, `INSERT OR REPLACE INTO rockets (`+rocketColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+func saveRocket(ctx context.Context, tx *sql.Tx, r rocket.Rocket) error {
+	_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO rockets (`+rocketColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Channel, r.Status, r.Type, r.Mission, r.Speed, r.ExplosionReason,
 		r.LastMessageNumber, r.LastMessageTime.Format(time.RFC3339Nano))
 	return err
 }
 
-// SavePendingMessage stores m to wait for an earlier message; a message already pending is kept.
-func (t sqliteTx) SavePendingMessage(ctx context.Context, m rocket.Message) error {
+// savePending stores m until the preceding messages arrive; an existing pending message with the same number is kept.
+func savePending(ctx context.Context, tx *sql.Tx, m rocket.Message) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	_, err = t.tx.ExecContext(ctx, `INSERT INTO pending_messages (channel, message_number, message) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO pending_messages (channel, message_number, message) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
 		m.Metadata.Channel, m.Metadata.MessageNumber, string(data))
 	return err
 }
 
-// DeletePendingMessages deletes channel's pending messages numbered up to throughNumber.
-func (t sqliteTx) DeletePendingMessages(ctx context.Context, channel string, throughNumber int) error {
-	_, err := t.tx.ExecContext(ctx, `DELETE FROM pending_messages WHERE channel = ? AND message_number <= ?`, channel, throughNumber)
-	return err
-}
-
-// querier is what getRocket needs from *sql.DB and *sql.Tx.
-type querier interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-func getRocket(ctx context.Context, q querier, channel string) (rocket.Rocket, error) {
-	r, err := scanRocket(q.QueryRowContext(ctx, `SELECT `+rocketColumns+` FROM rockets WHERE channel = ?`, channel))
+// takePending deletes and returns channel's pending message with the given number, or false if there is none.
+func takePending(ctx context.Context, tx *sql.Tx, channel string, number int64) (rocket.Message, bool, error) {
+	var data string
+	err := tx.QueryRowContext(ctx, `DELETE FROM pending_messages WHERE channel = ? AND message_number = ? RETURNING message`,
+		channel, number).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
-		return rocket.Rocket{}, rocket.ErrNotFound
+		return rocket.Message{}, false, nil
 	}
-	return r, err
+	if err != nil {
+		return rocket.Message{}, false, err
+	}
+	var m rocket.Message
+	if err := json.Unmarshal([]byte(data), &m); err != nil {
+		return rocket.Message{}, false, fmt.Errorf("decode pending message: %w", err)
+	}
+	return m, true, nil
 }
 
+// scanner is the subset of *sql.Row and *sql.Rows used by scanRocket.
 type scanner interface {
 	Scan(dest ...any) error
 }
 
+// scanRocket reads a rockets row; sql.ErrNoRows is reported as rocket.ErrNotFound.
 func scanRocket(row scanner) (rocket.Rocket, error) {
 	var r rocket.Rocket
 	var lastMessageTime string
 	err := row.Scan(&r.Channel, &r.Status, &r.Type, &r.Mission, &r.Speed, &r.ExplosionReason,
-		&r.LastMessageNumber, &lastMessageTime)
+		&r.LastMessageNumber, &lastMessageTime, &r.PendingMessages)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rocket.Rocket{}, rocket.ErrNotFound
+	}
 	if err != nil {
 		return rocket.Rocket{}, err
 	}

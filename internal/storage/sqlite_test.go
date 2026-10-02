@@ -2,7 +2,7 @@ package storage_test
 
 import (
 	"context"
-	"errors"
+	"math/rand/v2"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -10,10 +10,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/rocket"
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/storage"
+	"lunar-backend-engineer-challenge/internal/rocket"
+	"lunar-backend-engineer-challenge/internal/storage"
 )
 
+// openSQLite opens the database at path and closes it when the test ends.
 func openSQLite(t *testing.T, path string) *storage.SQLite {
 	t.Helper()
 	db, err := storage.OpenSQLite(path)
@@ -22,94 +23,112 @@ func openSQLite(t *testing.T, path string) *storage.SQLite {
 	return db
 }
 
-func newSQLite(t *testing.T) *storage.SQLite {
-	return openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
-}
-
-func speedUp(channel string, number int) rocket.Message {
+func newMessage(channel string, number int64, messageType rocket.MessageType, e rocket.Event) rocket.Message {
 	return rocket.Message{
-		Metadata: rocket.Metadata{Channel: channel, MessageNumber: number, MessageType: rocket.TypeSpeedIncreased},
-		Event:    rocket.SpeedIncreased{By: number},
+		Metadata: rocket.Metadata{Channel: channel, MessageNumber: number, MessageType: messageType},
+		Event:    e,
 	}
 }
 
-// inTx runs fn in a transaction and fails the test if it returns an error.
-func inTx(t *testing.T, db *storage.SQLite, fn func(tx rocket.TxStore) error) {
-	t.Helper()
-	require.NoError(t, db.WithTx(context.Background(), fn))
+func launch(channel string) rocket.Message {
+	return newMessage(channel, 1, rocket.TypeLaunched, rocket.Launched{Type: "Falcon-9", LaunchSpeed: 500, Mission: "ARTEMIS"})
 }
 
-func pendingNumbers(t *testing.T, db *storage.SQLite, channel string) []int {
-	t.Helper()
-	var numbers []int
-	inTx(t, db, func(tx rocket.TxStore) error {
-		pending, err := tx.GetPendingMessages(context.Background(), channel)
-		for _, m := range pending {
-			numbers = append(numbers, m.Metadata.MessageNumber)
-		}
-		return err
-	})
-	return numbers
+func speedUp(channel string, number int64, by int) rocket.Message {
+	return newMessage(channel, number, rocket.TypeSpeedIncreased, rocket.SpeedIncreased{By: by})
 }
 
 func TestGetRocketUnknown(t *testing.T) {
-	db := newSQLite(t)
+	db := openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
+
 	_, err := db.GetRocket(context.Background(), "unknown")
 	assert.ErrorIs(t, err, rocket.ErrNotFound)
-
-	inTx(t, db, func(tx rocket.TxStore) error {
-		_, err := tx.GetRocket(context.Background(), "unknown")
-		assert.ErrorIs(t, err, rocket.ErrNotFound)
-		return nil
-	})
 }
 
-func TestSaveAndGetRocket(t *testing.T) {
+func TestProcessMessageSavesRocket(t *testing.T) {
 	ctx := context.Background()
-	db := newSQLite(t)
-	want := rocket.Rocket{Channel: "ch1", Status: rocket.StatusLaunched, Type: "Falcon-9", Speed: 500, LastMessageNumber: 1}
-	inTx(t, db, func(tx rocket.TxStore) error { return tx.SaveRocket(ctx, want) })
+	db := openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
 
-	got, err := db.GetRocket(ctx, "ch1")
+	status, err := db.ProcessMessage(ctx, launch("ch1"), (*rocket.Rocket).Apply)
 	require.NoError(t, err)
-	assert.Equal(t, want, got)
+	assert.Equal(t, rocket.MessageApplied, status)
+	status, err = db.ProcessMessage(ctx, speedUp("ch1", 2, 100), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessageApplied, status)
+
+	r, err := db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, rocket.StatusLaunched, r.Status)
+	assert.Equal(t, 600, r.Speed)
+	assert.Equal(t, int64(2), r.LastMessageNumber)
 
 	rockets, err := db.ListRockets(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []rocket.Rocket{want}, rockets)
+	assert.Equal(t, []rocket.Rocket{r}, rockets)
 }
 
-func TestWithTxRollsBackOnError(t *testing.T) {
+func TestProcessMessageAppliesPendingWhenGapFills(t *testing.T) {
 	ctx := context.Background()
-	db := newSQLite(t)
-	failure := errors.New("failure")
+	db := openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
 
-	err := db.WithTx(ctx, func(tx rocket.TxStore) error {
-		require.NoError(t, tx.SaveRocket(ctx, rocket.NewRocket("ch1")))
-		require.NoError(t, tx.SavePendingMessage(ctx, speedUp("ch1", 2)))
-		return failure
-	})
-	assert.ErrorIs(t, err, failure)
+	// message #3
+	status, err := db.ProcessMessage(ctx, speedUp("ch1", 3, 10), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessagePending, status)
+	r, err := db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, rocket.Rocket{Channel: "ch1", Status: rocket.StatusAwaitingLaunch, PendingMessages: 1}, r, "an early message creates a rocket awaiting launch")
+	// message #4
+	status, err = db.ProcessMessage(ctx, speedUp("ch1", 4, 1), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessagePending, status)
+	// message #1
+	status, err = db.ProcessMessage(ctx, launch("ch1"), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessageApplied, status)
 
-	_, err = db.GetRocket(ctx, "ch1")
-	assert.ErrorIs(t, err, rocket.ErrNotFound)
-	assert.Empty(t, pendingNumbers(t, db, "ch1"))
+	r, err = db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), r.LastMessageNumber, "3 and 4 still wait for 2")
+	assert.Equal(t, 2, r.PendingMessages)
+
+	// message #2
+	status, err = db.ProcessMessage(ctx, speedUp("ch1", 2, 100), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessageApplied, status)
+	r, err = db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), r.LastMessageNumber)
+	assert.Equal(t, 611, r.Speed)
+	assert.Equal(t, 0, r.PendingMessages)
+
+	// message #4 (duplicate)
+	status, err = db.ProcessMessage(ctx, speedUp("ch1", 4, 1), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessageDuplicate, status)
+	after, err := db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, r, after, "a repeat changes nothing")
 }
 
-func TestPendingMessages(t *testing.T) {
+func TestProcessMessageKeepsFirstPending(t *testing.T) {
 	ctx := context.Background()
-	db := newSQLite(t)
-	inTx(t, db, func(tx rocket.TxStore) error {
-		for _, n := range []int{4, 2, 3, 2} { // 2 twice: the repeat is ignored
-			require.NoError(t, tx.SavePendingMessage(ctx, speedUp("ch1", n)))
-		}
-		return tx.SavePendingMessage(ctx, speedUp("other", 2))
-	})
-	assert.Equal(t, []int{2, 3, 4}, pendingNumbers(t, db, "ch1"), "ordered by number")
+	db := openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
 
-	inTx(t, db, func(tx rocket.TxStore) error { return tx.DeletePendingMessages(ctx, "ch1", 3) })
-	assert.Equal(t, []int{4}, pendingNumbers(t, db, "ch1"))
-	assert.Equal(t, []int{2}, pendingNumbers(t, db, "other"), "other channels are untouched")
+	// message #2
+	_, err := db.ProcessMessage(ctx, speedUp("ch1", 2, 100), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	// message #2 (duplicate)
+	status, err := db.ProcessMessage(ctx, speedUp("ch1", 2, 999), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	assert.Equal(t, rocket.MessagePending, status, "same number, different content")
+	// message #1
+	_, err = db.ProcessMessage(ctx, launch("ch1"), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+
+	r, err := db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, 600, r.Speed, "the first stored message 2 is applied")
 }
 
 func TestSurvivesRestart(t *testing.T) {
@@ -117,66 +136,76 @@ func TestSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rockets.db")
 
 	db := openSQLite(t, path)
-	inTx(t, db, func(tx rocket.TxStore) error {
-		require.NoError(t, tx.SaveRocket(ctx, rocket.NewRocket("ch1")))
-		return tx.SavePendingMessage(ctx, speedUp("ch1", 2))
-	})
+	// message #2
+	_, err := db.ProcessMessage(ctx, speedUp("ch1", 2, 100), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
 	db = openSQLite(t, path)
-	_, err := db.GetRocket(ctx, "ch1")
-	assert.NoError(t, err)
-	assert.Equal(t, []int{2}, pendingNumbers(t, db, "ch1"))
+	// message #1
+	_, err = db.ProcessMessage(ctx, launch("ch1"), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	r, err := db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, 600, r.Speed)
 }
 
 func TestReset(t *testing.T) {
 	ctx := context.Background()
-	db := newSQLite(t)
-	inTx(t, db, func(tx rocket.TxStore) error {
-		require.NoError(t, tx.SaveRocket(ctx, rocket.NewRocket("ch1")))
-		return tx.SavePendingMessage(ctx, speedUp("ch1", 2))
-	})
+	db := openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
+	// message #2
+	_, err := db.ProcessMessage(ctx, speedUp("ch1", 2, 100), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
 
 	require.NoError(t, db.Reset(ctx))
-	_, err := db.GetRocket(ctx, "ch1")
+	_, err = db.GetRocket(ctx, "ch1")
 	assert.ErrorIs(t, err, rocket.ErrNotFound)
-	assert.Empty(t, pendingNumbers(t, db, "ch1"))
+
+	// message #1
+	_, err = db.ProcessMessage(ctx, launch("ch1"), (*rocket.Rocket).Apply)
+	require.NoError(t, err)
+	r, err := db.GetRocket(ctx, "ch1")
+	require.NoError(t, err)
+	assert.Equal(t, 500, r.Speed, "the deleted pending message is not applied")
 }
 
-// TestConcurrentTransactions increments rockets from many goroutines while reading; each
-// increment is a read-modify-write in one transaction, so none may be lost. Run with -race.
-func TestConcurrentTransactions(t *testing.T) {
+// TestConcurrentProcessMessages verifies the Store locking contract with the real domain rule:
+// after launch, messages 2 to 101 for each rocket arrive concurrently, in random order and twice each,
+// and none may be lost or applied twice. SQLite satisfies it through its single writer. Run with -race.
+func TestConcurrentProcessMessages(t *testing.T) {
 	ctx := context.Background()
-	db := newSQLite(t)
+	db := openSQLite(t, filepath.Join(t.TempDir(), "rockets.db"))
 	channels := []string{"a", "b", "c"}
+	for _, ch := range channels {
+		_, err := db.ProcessMessage(ctx, launch(ch), (*rocket.Rocket).Apply)
+		require.NoError(t, err)
+	}
+
+	var msgs []rocket.Message
+	for n := int64(2); n <= 101; n++ {
+		for _, ch := range channels {
+			msgs = append(msgs, speedUp(ch, n, 1), speedUp(ch, n, 1)) // each delivered twice
+		}
+	}
+	rand.Shuffle(len(msgs), func(i, j int) { msgs[i], msgs[j] = msgs[j], msgs[i] })
 
 	var wg sync.WaitGroup
-	for range 100 {
-		for _, ch := range channels {
-			wg.Go(func() {
-				assert.NoError(t, db.WithTx(ctx, func(tx rocket.TxStore) error {
-					r, err := tx.GetRocket(ctx, ch)
-					if errors.Is(err, rocket.ErrNotFound) {
-						r, err = rocket.NewRocket(ch), nil
-					}
-					if err != nil {
-						return err
-					}
-					r.Speed++
-					return tx.SaveRocket(ctx, r)
-				}))
-			})
-			wg.Go(func() {
-				_, err := db.ListRockets(ctx)
-				assert.NoError(t, err)
-			})
-		}
+	for _, m := range msgs {
+		wg.Go(func() {
+			_, err := db.ProcessMessage(ctx, m, (*rocket.Rocket).Apply)
+			assert.NoError(t, err)
+		})
+		wg.Go(func() {
+			_, err := db.ListRockets(ctx)
+			assert.NoError(t, err)
+		})
 	}
 	wg.Wait()
 
 	for _, ch := range channels {
 		r, err := db.GetRocket(ctx, ch)
 		require.NoError(t, err)
-		assert.Equal(t, 100, r.Speed, ch)
+		assert.Equal(t, 600, r.Speed, ch)
+		assert.Equal(t, int64(101), r.LastMessageNumber, ch)
 	}
 }

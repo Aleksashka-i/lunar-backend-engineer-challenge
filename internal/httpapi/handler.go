@@ -5,10 +5,11 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/rocket"
+	"lunar-backend-engineer-challenge/internal/rocket"
 )
 
 //go:embed dashboard.html
@@ -34,15 +35,16 @@ func New(svc *rocket.Service, log *slog.Logger) http.Handler {
 func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
 	var m rocket.Message
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid message: "+err.Error())
+		if !errors.Is(err, rocket.ErrInvalidMessage) { // malformed JSON
+			err = fmt.Errorf("%w: %v", rocket.ErrInvalidMessage, err)
+		}
+		h.writeServiceError(w, err)
 		return
 	}
 	if err := h.svc.ProcessMessage(r.Context(), m); err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
-	// No body: the rockets test client does not read response bodies, so any
-	// body would stop it from reusing the connection.
 	w.WriteHeader(http.StatusAccepted)
 }
 

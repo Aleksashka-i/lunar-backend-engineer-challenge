@@ -1,10 +1,9 @@
-// Package rocket holds the domain: rockets, the messages that change them, and
-// the service that ingests and queries them.
+// Package rocket contains the domain model (rockets and the messages that change them) and the service that processes and queries them.
 package rocket
 
 import "time"
 
-// Status is where a rocket is in its lifecycle.
+// Status is a rocket's lifecycle stage.
 type Status string
 
 const (
@@ -13,13 +12,13 @@ const (
 	StatusExploded       Status = "exploded"
 )
 
-// MessageStatus is what happened to a received message.
+// MessageStatus is the outcome of applying a message to a rocket.
 type MessageStatus string
 
 const (
 	MessageApplied   MessageStatus = "applied"   // applied to the rocket's state
-	MessagePending   MessageStatus = "pending"   // waiting for an earlier message
-	MessageDuplicate MessageStatus = "duplicate" // already applied, ignored
+	MessagePending   MessageStatus = "pending"   // awaiting an earlier message
+	MessageDuplicate MessageStatus = "duplicate" // already applied; ignored
 )
 
 // Rocket is the current state of a rocket, derived from its messages.
@@ -30,16 +29,18 @@ type Rocket struct {
 	Mission           string    `json:"mission"`
 	Speed             int       `json:"speed"`
 	ExplosionReason   string    `json:"explosionReason,omitempty"`
-	LastMessageNumber int       `json:"lastMessageNumber"`
+	LastMessageNumber int64     `json:"lastMessageNumber"`
 	LastMessageTime   time.Time `json:"lastMessageTime"`
+	// PendingMessages counts messages that arrived early and wait for a gap to fill; set by the store on read.
+	PendingMessages int `json:"pendingMessages"`
 }
 
-// NewRocket creates a rocket for channel that has not launched yet.
+// NewRocket returns an unlaunched rocket for channel.
 func NewRocket(channel string) Rocket {
 	return Rocket{Channel: channel, Status: StatusAwaitingLaunch}
 }
 
-// Apply applies m if it is the next message, and reports whether it was applied, is early or is a repeat.
+// Apply applies m if it is the next message in sequence and reports the outcome.
 func (r *Rocket) Apply(m Message) MessageStatus {
 	switch number := m.Metadata.MessageNumber; {
 	case number <= r.LastMessageNumber:
@@ -51,13 +52,4 @@ func (r *Rocket) Apply(m Message) MessageStatus {
 	r.LastMessageNumber = m.Metadata.MessageNumber
 	r.LastMessageTime = m.Metadata.MessageTime
 	return MessageApplied
-}
-
-// ApplyPending applies pending messages, sorted by number, that follow the last applied one, stopping at the first gap.
-func (r *Rocket) ApplyPending(pending []Message) {
-	for _, m := range pending {
-		if r.Apply(m) == MessagePending {
-			return
-		}
-	}
 }

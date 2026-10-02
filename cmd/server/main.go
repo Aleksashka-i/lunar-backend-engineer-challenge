@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/httpapi"
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/rocket"
-	"github.com/Aleksashka-i/lunar-backend-engineer-challenge/internal/storage"
+	"lunar-backend-engineer-challenge/internal/httpapi"
+	"lunar-backend-engineer-challenge/internal/rocket"
+	"lunar-backend-engineer-challenge/internal/storage"
 )
 
 func main() {

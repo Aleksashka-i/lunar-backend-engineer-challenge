@@ -1,7 +1,7 @@
 .PHONY: run test build
 
 run:
-	go run ./cmd/server
+	go run ./cmd/server $(ARGS)
 
 test:
 	go test -race ./...
